@@ -1,203 +1,160 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # -*- coding: UTF-8 -*-
 #
-#  Copyright (C) 2009-2015 Arkadiusz Miśkiewicz <arekm@pld-linux.org>
+# Copyright (C) 2009-2015 Arkadiusz Miśkiewicz <arekm@pld-linux.org>
 #
-#  This program is free software: you can redistribute it and/or modify
-#  it under the terms of the GNU General Public License as published by
-#  the Free Software Foundation, either version 3 of the License, or
-#  (at your option) any later version.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 #
-#  This program is distributed in the hope that it will be useful,
-#  but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#  GNU General Public License for more details.
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
 #
-#  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 # napiprojekt.pl API is used with napiproject administration consent
 # (given by Marek <kontakt@napiprojekt.pl> at Wed, 24 Feb 2010 14:43:00 +0100)
 #
 # napisy24.pl API access granted by napisy24 admins at 15 Feb 2015
 #
+#
+# Copyright (C) 2022 TLeepa <tleepa@gmail.com>
+#
 
-import StringIO
+
+from hashlib import md5
+from time import sleep
+from urllib.parse import urlencode
+
+import aiofiles
+import asyncio
+import argparse
 import base64
-import re
-import sys
-import mimetypes
-import urllib
-import urllib2
-import time
+import io
 import os
-import getopt
-import socket
+import requests
 import struct
+import sys
 import xml.etree.ElementTree as etree
 import zipfile
 
-try:
-    from hashlib import md5 as md5
-except ImportError:
-    from md5 import md5
 
 prog = os.path.basename(sys.argv[0])
+languages = {"pl": "PL", "en": "ENG"}
+video_files = [
+    "asf",
+    "avi",
+    "divx",
+    "m2ts",
+    "mkv",
+    "mp4",
+    "mpeg",
+    "mpg",
+    "ogm",
+    "rm",
+    "rmvb",
+    "wmv",
+]
 
-video_files = [ 'asf', 'avi', 'divx', 'm2ts', 'mkv', 'mp4', 'mpeg', 'mpg', 'ogm', 'rm', 'rmvb', 'wmv' ]
-languages = { 'pl': 'PL', 'en': 'ENG' }
 
-def calculate_digest(filename):
+async def calculate_digest(filename: str) -> str:
     d = md5()
     try:
-        d.update(open(filename, "rb").read(10485760))
-    except (IOError, OSError), e:
-        raise Exception('Hashing video file failed: %s' % ( e ))
+        async with aiofiles.open(filename, mode="rb") as f:
+            d.update(await f.read(10485760))
+    except (IOError, OSError) as e:
+        raise Exception(f"Hashing video file failed: {e}")
     return d.hexdigest()
 
-def napisy24_hash(filename): 
-    try: 
-        longlongformat = '<q'  # little-endian long long
+
+async def napisy24_hash(filename: str) -> str:
+    try:
+        longlongformat = "<q"  # little-endian long long
         bytesize = struct.calcsize(longlongformat)
 
-        f = open(filename, "rb")
+        async with aiofiles.open(filename, mode="rb") as f:
+            filesize = os.path.getsize(filename)
+            hash = filesize
 
-        filesize = os.path.getsize(filename)
-        hash = filesize
+            if filesize < 65536 * 2:
+                raise Exception(
+                    f"Hashing (napisy24) video file failed: '{filename}': File too small"
+                )
 
-        if filesize < 65536 * 2:
-            raise Exception('Hashing (napisy24) video file failed: `%s\': File too small' % ( filename ))
+            for _ in range(int(65536 / bytesize)):
+                buffer = await f.read(bytesize)
+                (l_value,) = struct.unpack(longlongformat, buffer)
+                hash += l_value
+                hash = hash & 0xFFFFFFFFFFFFFFFF  # to remain as 64bit number
 
-        for x in range(65536/bytesize): 
-            buffer = f.read(bytesize) 
-            (l_value,)= struct.unpack(longlongformat, buffer)  
-            hash += l_value 
-            hash = hash & 0xFFFFFFFFFFFFFFFF #to remain as 64bit number  
+            f.seek(max(0, filesize - 65536), 0)
+            for _ in range(int(65536 / bytesize)):
+                buffer = await f.read(bytesize)
+                (l_value,) = struct.unpack(longlongformat, buffer)
+                hash += l_value
+                hash = hash & 0xFFFFFFFFFFFFFFFF
+
+        returnedhash = "%016x" % hash
+        return returnedhash
+
+    except IOError as e:
+        raise Exception(f"Hashing (napisy24) video file failed: {e}")
 
 
-        f.seek(max(0,filesize-65536),0) 
-        for x in range(65536/bytesize): 
-            buffer = f.read(bytesize) 
-            (l_value,)= struct.unpack(longlongformat, buffer)  
-            hash += l_value 
-            hash = hash & 0xFFFFFFFFFFFFFFFF 
-
-        f.close() 
-        returnedhash =  "%016x" % hash 
-        return returnedhash 
-
-    except IOError, e:
-        raise Exception('Hashing (napisy24) video file failed: %s' % ( e ))
-
-def usage():
-    print >> sys.stderr, "Usage: %s [OPTIONS]... [FILE|DIR]..." % prog
-    print >> sys.stderr, "Find video files and download matching subtitles from napiprojekt/napisy24 server."
-    print >> sys.stderr
-    print >> sys.stderr, "Supported options:"
-    print >> sys.stderr, "     -h, --help            display this help and exit"
-    print >> sys.stderr, "     -l, --lang=LANG       subtitles language"
-    print >> sys.stderr, "     -n, --nobackup        make no subtitle backup when in update mode"
-    print >> sys.stderr, "     -c, --nocover         do not download cover images"
-    print >> sys.stderr, "     -u, --update          fetch new and also update existing subtitles"
-    print >> sys.stderr, "     -d, --dest=DIR        destination directory"
-    print >> sys.stderr
-    print >> sys.stderr, "Report bugs to <arekm@pld-linux.org>."
-
-def get_desc_links(digest, file=None):
-    # improve me
-    re_link = re.compile(r'<a.*?href=[\'"](http://.*?)[ >\'"]', re.IGNORECASE)
-    d = ""
-
-    try:
-        url = "http://www.napiprojekt.pl/index.php3?www=opis.php3&id=%s&film=%s" % (urllib2.quote(digest), urllib2.quote(file))
-        f = urllib2.urlopen(url)
-        d = f.read()
-        f.close()
-    except Exception, e:
-        return False
-    links = re_link.findall(d)
-    ignore = [ r'.*dobreprogramy\.pl', r'.*napiprojekt\.pl.*', r'.*nokaut\.pl.*', r'.*rodisite\.com.*' ]
-    for i in range(0, len(ignore)):
-        ignore[i] = re.compile(ignore[i], re.IGNORECASE)
-    ilinks = links[:]
-    for l in ilinks:
-        # main pages are useless
-        if l.count('/') < 3:
-            links.remove(l)
-            continue
-        # blacklisted sites
-        for i in ignore:
-            if i.match(l):
-                links.remove(l)
-    return links
-
-def get_cover(digest):
-    cover = ""
-    try:
-        url = "http://www.napiprojekt.pl/okladka_pobierz.php?id=%s&oceny=-1" % (urllib2.quote(digest))
-        f = urllib2.urlopen(url)
-        cover = f.read()
-        f.close()
-        content_type = f.info()['Content-Type']
-        extension = mimetypes.guess_all_extensions(content_type)[-1]
-    except Exception, e:
-        return False
-    return (cover, extension)
-
-def get_subtitle_napisy24(filename, digest=False, lang="pl"):
-    raise Exception('Subtitle NOT FOUND')
-
+async def get_subtitle_napisy24(
+    filename: str, digest: bool = False, lang: str = "pl"
+) -> bytes:
     url = "http://napisy24.pl/run/CheckSubAgent.php"
+    headers = {"Content-type": "application/x-www-form-urlencoded"}
 
     pdata = []
-    pdata.append(('postAction', 'CheckSub'))
-    pdata.append(('ua', 'pynapi'))
-    pdata.append(('ap', 'XaA!29OkF5Pe'))
-    pdata.append(('nl', lang))
-    pdata.append(('fn', filename))
-    pdata.append(('fh', napisy24_hash(filename)))
-    pdata.append(('fs', os.path.getsize(filename)))
+    pdata.append(("postAction", "CheckSub"))
+    pdata.append(("ua", "pynapi"))
+    pdata.append(("ap", "XaA!29OkF5Pe"))
+    pdata.append(("nl", lang))
+    pdata.append(("fn", filename))
+    pdata.append(("fh", await napisy24_hash(filename)))
+    pdata.append(("fs", os.path.getsize(filename)))
     if digest:
-        pdata.append(('md5', digest))
+        pdata.append(("md5", digest))
 
     repeat = 3
     error = "Fetching subtitle (napisy24) failed:"
     while repeat > 0:
         repeat = repeat - 1
         try:
-            sub = urllib2.urlopen(url, data=urllib.urlencode(pdata))
-            if hasattr(sub, 'getcode'):
-                http_code = sub.getcode() 
-            sub = sub.read()
-        except (IOError, OSError), e:
-            error = error + " %s" % (e)
-            time.sleep(0.5)
+            r = requests.post(url, headers=headers, data=urlencode(pdata))
+            subdata = r.content
+        except (IOError, OSError) as e:
+            error = f"{error} {e}"
+            sleep(0.5)
             continue
 
-        if http_code != 200:
-            error = error + ",HTTP code: %s" % (str(http_code))
-            time.sleep(0.5)
+        if not r.ok:
+            error = f"{error}, HTTP code: {str(r.status_code)}"
+            sleep(0.5)
             continue
 
-        err_add = ''
-        if sub.startswith('OK-2|'):
-            pos = sub.find('||')
-            if pos >= 2 and len(sub) > (pos + 2):
-                sub = sub[pos+2:]
+        if subdata.startswith(b"OK-2|"):
+            pos = subdata.find(b"||")
+            if pos >= 2 and len(subdata) > (pos + 2):
+                subdata = subdata[pos + 2 :]
 
-                try:  
-                    subzip=zipfile.ZipFile(StringIO.StringIO(sub))
-                    sub=''
-                    for name in subzip.namelist():
-                        sub += subzip.read(name)
-                except Exception, e:
-                    raise Exception('Subtitle NOT FOUND%s' % e)
+                try:
+                    subzip = zipfile.ZipFile(io.BytesIO(subdata))
+                    sub = subzip.read(subzip.namelist()[0])
+                except Exception as e:
+                    raise Exception(f"Subtitle NOT FOUND {e}")
             else:
-                raise Exception('Subtitle NOT FOUND (subtitle too short)')
-        elif sub.startswith('OK-'):
-            raise Exception('Subtitle NOT FOUND')
+                raise Exception("Subtitle NOT FOUND (subtitle too short)")
+        elif subdata.startswith(b"OK-"):
+            raise Exception("Subtitle NOT FOUND")
         else:
-            raise Exception('Subtitle NOT FOUND (unknown error)')
+            raise Exception("Subtitle NOT FOUND (unknown error)")
 
         repeat = 0
 
@@ -206,50 +163,54 @@ def get_subtitle_napisy24(filename, digest=False, lang="pl"):
 
     return sub
 
-def get_subtitle_napiprojekt(digest, lang="PL"):
-    data = {
-            "downloaded_subtitles_id" : digest,
-            "mode" : "1",
-            "client" : "pynapi",
-            "client_ver": "0",
-            "downloaded_subtitles_lang" : lang,
-            "downloaded_subtitles_txt" : "1"
-            }
 
-    req = urllib2.Request("http://napiprojekt.pl/api/api-napiprojekt3.php", urllib.urlencode(data))
+async def get_subtitle_napiprojekt(digest: str, lang: str = "PL") -> bytes:
+    url = "http://napiprojekt.pl/api/api-napiprojekt3.php"
+    headers = {"Content-type": "application/x-www-form-urlencoded"}
+
+    data = {
+        "downloaded_subtitles_id": digest,
+        "mode": "1",
+        "client": "pynapi",
+        "client_ver": "0",
+        "downloaded_subtitles_lang": lang,
+        "downloaded_subtitles_txt": "1",
+    }
+
     repeat = 3
     sub = None
-    http_code = 200
     error = "Fetching subtitle (napiprojekt) failed:"
     while repeat > 0:
         repeat = repeat - 1
         try:
-            subdata = urllib2.urlopen(req)
-            if hasattr(sub, 'getcode'):
-                http_code = subdata.getcode() 
-            subdata = subdata.read()
-        except (IOError, OSError), e:
-            error = error + " %s" % (e)
-            time.sleep(0.5)
+            r = requests.post(
+                url,
+                headers=headers,
+                data=urlencode(data),
+            )
+            subdata = r.content.decode()
+        except (IOError, OSError) as e:
+            error = f"{error} {e}"
+            sleep(0.5)
             continue
-    
-        if http_code != 200:
-            error = error + ",HTTP code: %s" % (str(http_code))
-            time.sleep(0.5)
+
+        if not r.ok:
+            error = f"{error}, HTTP code: {str(r.status_code)}"
+            sleep(0.5)
             continue
 
         try:
             root = etree.fromstring(subdata)
-            status = root.find('status')
+            status = root.find("status")
             if status is not None and status.text == "success":
-                content = root.find('subtitles/content')
+                content = root.find("subtitles/content")
                 sub = base64.b64decode(content.text)
                 break
             else:
-                raise Exception('Subtitle NOT FOUND')
-        except Exception, e:
-            error = error + ",XML parsing: %s" % e
-            time.sleep(0.5)
+                raise Exception("Subtitle NOT FOUND")
+        except Exception as e:
+            error = f"{error}, XML parsing: {e}"
+            sleep(0.5)
             continue
 
     if sub is None or sub == "":
@@ -257,138 +218,128 @@ def get_subtitle_napiprojekt(digest, lang="PL"):
 
     return sub
 
-def main(argv=sys.argv):
 
-    try:
-        opts, args = getopt.getopt(argv[1:], "d:hl:nuc", ["dest", "help", "lang", "nobackup", "update", "nocover"])
-    except getopt.GetoptError, err:
-        print str(err)
-        usage()
-        return 2
+async def process_file(file: str, args: argparse.Namespace) -> None:
+    digest = None
 
-    output = None
-    verbose = False
-    nobackup = False
-    nocover = False
-    update = False
-    lang = 'pl'
-    dest = None
-    for o, a in opts:
-        if o == "-v":
-            verbose = True
-        elif o in ("-h", "--help"):
-            usage()
-            return 0
-        elif o in ("-l", "--lang"):
-            if a in languages:
-                lang = a
-            else:
-                print >> sys.stderr, "%s: unsupported language `%s'. Supported languages: %s" % (prog, a, str(languages.keys()))
-                return 1
-        elif o in ("-n", "--nobackup"):
-            nobackup = True
-        elif o in ("-u", "--update"):
-            update = True
-        elif o in ("-c", "--nocover"):
-            nocover = True
-        elif o in ("-d", "--dest"):
-            dest = a
-        else:
-            print >> sys.stderr, "%s: unhandled option" % prog
-            return 1
-
-    if not args:
-        usage()
-        return 2
-
-    print >> sys.stderr, "%s: Subtitles language `%s'. Finding video files..." % (prog, lang)
-
-    socket.setdefaulttimeout(180)
-
-    files = []
-    for arg in args:
-        if os.path.isdir(arg):
-            for dirpath, dirnames, filenames in os.walk(arg, topdown=False):
-                for file in filenames:
-                    if file[-4:-3] == '.' and file.lower()[-3:] in video_files:
-                        files.append(os.path.join(dirpath, file))
-        else:
-            files.append(arg)
-
-    files.sort()
-
-    i_total = len(files)
-    i = 0
-
-    for file in files:
-        i += 1
-
-        vfile = file + '.txt'
+    if file.startswith("napiprojekt:"):
+        digest = file.split(":")[-1]
+        vfile = digest + ".txt"
+    else:
+        vfile = file + ".txt"
         basefile = file
         if len(file) > 4:
             basefile = file[:-4]
-            vfile = basefile + '.txt'
-        if dest:
-            vfile = os.path.join(dest, os.path.split(vfile)[1])
+            vfile = basefile + ".txt"
 
-        if not update and os.path.exists(vfile):
-            continue
+    if args.dest:
+        vfile = os.path.join(args.dest, os.path.split(vfile)[1])
 
-        if not nobackup and os.path.exists(vfile):
-            vfile_bak = vfile + '-bak'
-            try:
-                os.rename(vfile, vfile_bak)
-            except (IOError, OSError), e:
-                print >> sys.stderr, "%s: Skipping due to backup of `%s' as `%s' failure: %s" % (prog, vfile, vfile_bak, e)
-                continue
-            else:
-                print >> sys.stderr, "%s: Old subtitle backed up as `%s'" % (prog, vfile_bak)
+    if not args.update and os.path.exists(vfile):
+        print(
+            f"{prog}: Skipping {file} because update flag not set and '{vfile}' already exists"
+        )
+        return
 
-        print >> sys.stderr, "%s: %d/%d: Processing subtitle for %s" % (prog, i, i_total, file)
-
+    if not args.nobackup and os.path.exists(vfile):
+        vfile_bak = vfile + "-bak"
         try:
-            digest = calculate_digest(file)
-        except:
-            print >> sys.stderr, "%s: %d/%d: %s" % (prog, i, i_total, sys.exc_info()[1])
-            continue
+            os.rename(vfile, vfile_bak)
+        except (IOError, OSError) as e:
+            print(
+                f"{prog}: Skipping {file} due to backup of '{vfile}' as '{vfile_bak}' failure: {e}"
+            )
+            return
+        else:
+            print(f"{prog}: Old {file} subtitle backed up as '{vfile_bak}'")
 
+    print(f"{prog}: Processing subtitle for {file}")
+
+    try:
+        if not digest:
+            digest = await calculate_digest(file)
+    except:
+        print(f"{prog}: {sys.exc_info()[1]}")
+        return
+
+    try:
+        sub = await get_subtitle_napiprojekt(digest, languages[args.lang])
+    except:
         try:
-            sub = get_subtitle_napiprojekt(digest, languages[lang])
+            sub = await get_subtitle_napisy24(file, digest, args.lang)
         except:
-            try:
-                sub = get_subtitle_napisy24(file, digest, lang)
-            except:
-                print >> sys.stderr, "%s: %d/%d: %s" % (prog, i, i_total, sys.exc_info()[1])
-                continue
+            print(f"{prog}: Error for {file}: {sys.exc_info()[1]}")
+            return
 
-        fp = open(vfile, 'wb')
-        fp.write(sub)
-        fp.close()
-    
-        desc = get_desc_links(digest, file)
-        if desc:
-            print >> sys.stderr, "%s: %d/%d: Description: " % (prog, i, i_total)
-            for desc_i in desc:
-                print >> sys.stderr, "\t\t%s" % desc_i
-   
-        cover_stored = ""
-        if not nocover:
-            cover_data = get_cover(digest)
-            if cover_data:
-                cover, extension = cover_data
-                fp = open(basefile + extension, 'wb')
-                fp.write(cover)
-                fp.close()
-                cover_stored = ", %s COVER STORED (%d bytes)" % (extension, len(cover))
+    async with aiofiles.open(vfile, "wb") as fp:
+        await fp.write(sub)
 
-        print >> sys.stderr, "%s: %d/%d: SUBTITLE STORED (%d bytes)%s" % (prog, i, i_total, len(sub), cover_stored)
+    print(f"{prog}: SUBTITLE STORED for {file} ({len(sub)} bytes)")
 
-    return 0
+
+async def main(args: argparse.Namespace) -> None:
+
+    print(f"{prog}: Subtitles language '{args.lang}'. Looking for video files...")
+
+    files = []
+    for f in args.file:
+        if os.path.isdir(f):
+            for dirpath, _, filenames in os.walk(f, topdown=False):
+                for file in filenames:
+                    if file[-4:-3] == "." and file.lower()[-3:] in video_files:
+                        files.append(os.path.join(dirpath, file))
+        else:
+            files.append(f)
+
+    files.sort()
+
+    cors = []
+    for file in files:
+        cors.append(process_file(file, args))
+
+    if cors:
+        await asyncio.gather(*cors)
+    else:
+        print(f"{prog}: No video files found...")
+
 
 if __name__ == "__main__":
-    ret = None
     try:
-        ret = main()
-    except (KeyboardInterrupt, SystemExit):
-        print >> sys.stderr, "%s: Interrupted, aborting." % prog
-    sys.exit(ret)
+        parser = argparse.ArgumentParser(
+            prog=prog,
+            description="Find video files and download matching subtitles from napiprojekt/napisy24 server.",
+        )
+        parser.add_argument(
+            "file", help="file or directory", nargs="*", metavar="FILE/DIR"
+        )
+        parser.add_argument(
+            "-l",
+            "--lang",
+            choices=list(languages.keys()),
+            help="subtitles language",
+            default="pl",
+        )
+        parser.add_argument(
+            "-n",
+            "--nobackup",
+            action="store_true",
+            help="make no subtitle backup when in update mode",
+        )
+        parser.add_argument(
+            "-u",
+            "--update",
+            action="store_true",
+            help="fetch new and also update existing subtitles",
+        )
+        parser.add_argument("-d", "--dest", help="destination directory")
+        args = parser.parse_args()
+        if not args.file:
+            parser.print_help()
+
+        if args.file:
+            asyncio.run(main(args))
+
+    except SystemExit:
+        pass
+    except Exception as e:
+        print(f"Error: {e}\n")
