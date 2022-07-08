@@ -27,7 +27,6 @@
 
 
 from hashlib import md5
-from time import sleep
 from urllib.parse import urlencode
 
 import aiofiles
@@ -46,18 +45,18 @@ import zipfile
 prog = os.path.basename(sys.argv[0])
 languages = {"pl": "PL", "en": "ENG"}
 video_files = [
-    "asf",
-    "avi",
-    "divx",
-    "m2ts",
-    "mkv",
-    "mp4",
-    "mpeg",
-    "mpg",
-    "ogm",
-    "rm",
-    "rmvb",
-    "wmv",
+    ".asf",
+    ".avi",
+    ".divx",
+    ".m2ts",
+    ".mkv",
+    ".mp4",
+    ".mpeg",
+    ".mpg",
+    ".ogm",
+    ".rm",
+    ".rmvb",
+    ".wmv",
 ]
 
 
@@ -91,7 +90,7 @@ async def napisy24_hash(filename: str) -> str:
                 hash += l_value
                 hash = hash & 0xFFFFFFFFFFFFFFFF  # to remain as 64bit number
 
-            f.seek(max(0, filesize - 65536), 0)
+            await f.seek(max(0, filesize - 65536), 0)
             for _ in range(int(65536 / bytesize)):
                 buffer = await f.read(bytesize)
                 (l_value,) = struct.unpack(longlongformat, buffer)
@@ -106,7 +105,7 @@ async def napisy24_hash(filename: str) -> str:
 
 
 async def get_subtitle_napisy24(
-    filename: str, digest: bool = False, lang: str = "pl"
+    filename: str, digest: str = None, lang: str = "pl"
 ) -> bytes:
     url = "http://napisy24.pl/run/CheckSubAgent.php"
     headers = {"Content-type": "application/x-www-form-urlencoded"}
@@ -131,12 +130,12 @@ async def get_subtitle_napisy24(
             subdata = r.content
         except (IOError, OSError) as e:
             error = f"{error} {e}"
-            sleep(0.5)
+            await asyncio.sleep(0.5)
             continue
 
         if not r.ok:
             error = f"{error}, HTTP code: {str(r.status_code)}"
-            sleep(0.5)
+            await asyncio.sleep(0.5)
             continue
 
         if subdata.startswith(b"OK-2|"):
@@ -191,12 +190,12 @@ async def get_subtitle_napiprojekt(digest: str, lang: str = "PL") -> bytes:
             subdata = r.content.decode()
         except (IOError, OSError) as e:
             error = f"{error} {e}"
-            sleep(0.5)
+            await asyncio.sleep(0.5)
             continue
 
         if not r.ok:
             error = f"{error}, HTTP code: {str(r.status_code)}"
-            sleep(0.5)
+            await asyncio.sleep(0.5)
             continue
 
         try:
@@ -209,8 +208,8 @@ async def get_subtitle_napiprojekt(digest: str, lang: str = "PL") -> bytes:
             else:
                 raise Exception("Subtitle NOT FOUND")
         except Exception as e:
-            error = f"{error}, XML parsing: {e}"
-            sleep(0.5)
+            error = f"{error} XML parsing: {e}"
+            await asyncio.sleep(0.5)
             continue
 
     if sub is None or sub == "":
@@ -286,9 +285,9 @@ async def main(args: argparse.Namespace) -> None:
         if os.path.isdir(f):
             for dirpath, _, filenames in os.walk(f, topdown=False):
                 for file in filenames:
-                    if file[-4:-3] == "." and file.lower()[-3:] in video_files:
+                    if os.path.splitext(file)[1] in video_files:
                         files.append(os.path.join(dirpath, file))
-        else:
+        elif os.path.splitext(f)[1] in video_files or f.startswith("napiprojekt:"):
             files.append(f)
 
     files.sort()
@@ -332,11 +331,11 @@ if __name__ == "__main__":
             help="fetch new and also update existing subtitles",
         )
         parser.add_argument("-d", "--dest", help="destination directory")
+
         args = parser.parse_args()
         if not args.file:
             parser.print_help()
-
-        if args.file:
+        else:
             asyncio.run(main(args))
 
     except SystemExit:
