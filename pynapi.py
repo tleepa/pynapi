@@ -218,7 +218,9 @@ async def get_subtitle_napiprojekt(digest: str, lang: str = "PL") -> bytes:
     return sub
 
 
-async def process_file(file: str, args: argparse.Namespace) -> None:
+async def process_file(
+    index: int, total_files: int, file: str, args: argparse.Namespace
+) -> None:
     digest = None
 
     if file.startswith("napiprojekt:"):
@@ -236,7 +238,7 @@ async def process_file(file: str, args: argparse.Namespace) -> None:
 
     if not args.update and os.path.exists(vfile):
         print(
-            f"{prog}: Skipping {file} because update flag not set and '{vfile}' already exists"
+            f"{prog}: {index}/{total_files}: Skipping because update flag not set and '{vfile}' already exists"
         )
         return
 
@@ -246,13 +248,15 @@ async def process_file(file: str, args: argparse.Namespace) -> None:
             os.rename(vfile, vfile_bak)
         except (IOError, OSError) as e:
             print(
-                f"{prog}: Skipping {file} due to backup of '{vfile}' as '{vfile_bak}' failure: {e}"
+                f"{prog}: {index}/{total_files}: Skipping due to backup of '{vfile}' as '{vfile_bak}' failure: {e}"
             )
             return
         else:
-            print(f"{prog}: Old {file} subtitle backed up as '{vfile_bak}'")
+            print(
+                f"{prog}: {index}/{total_files}: Old subtitle backed up as '{vfile_bak}'"
+            )
 
-    print(f"{prog}: Processing subtitle for {file}")
+    print(f"{prog}: {index}/{total_files}: Processing subtitle for {file}")
 
     try:
         if not digest:
@@ -267,13 +271,13 @@ async def process_file(file: str, args: argparse.Namespace) -> None:
         try:
             sub = await get_subtitle_napisy24(file, digest, args.lang)
         except:
-            print(f"{prog}: Error for {file}: {sys.exc_info()[1]}")
+            print(f"{prog}: {index}/{total_files}: {sys.exc_info()[1]}")
             return
 
     async with aiofiles.open(vfile, "wb") as fp:
         await fp.write(sub)
 
-    print(f"{prog}: SUBTITLE STORED for {file} ({len(sub)} bytes)")
+    print(f"{prog}: {index}/{total_files}: SUBTITLE STORED ({len(sub)} bytes)")
 
 
 async def main(args: argparse.Namespace) -> None:
@@ -293,8 +297,8 @@ async def main(args: argparse.Namespace) -> None:
     files.sort()
 
     cors = []
-    for file in files:
-        cors.append(process_file(file, args))
+    for index, file in enumerate(files, start=1):
+        cors.append(process_file(index, len(files), file, args))
 
     if cors:
         await asyncio.gather(*cors)
