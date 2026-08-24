@@ -25,6 +25,14 @@
 # Copyright (C) 2022 TLeepa <tleepa@gmail.com>
 #
 
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "aiofiles",
+#   "asyncio",
+#   "requests",
+# ]
+# ///
 
 from hashlib import md5
 from urllib.parse import urlencode
